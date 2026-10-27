@@ -1,0 +1,38 @@
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environment configurations and secrets
+.env
+.env.*
+!.env.example
+
+# Node.js / frontend dependencies & build outputs
+node_modules/
+dist/
+build/
+.next/
+.turbo/
+
+# Generated databases & runtime state
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

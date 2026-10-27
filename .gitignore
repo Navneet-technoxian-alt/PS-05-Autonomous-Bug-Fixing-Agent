@@ -3,3 +3,8 @@
 .gsd/TODO.md
 .gsd-temp/
 .gemini/
+
+# PS-05 and general Python ignores
+**/.venv/
+**/__pycache__/
+**/.pytest_cache/
