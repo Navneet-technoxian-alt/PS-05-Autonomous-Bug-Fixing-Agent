@@ -189,7 +189,7 @@ class LocalizeResponse(BaseModel):
 
 
 class PatchProposeRequest(BaseModel):
-    """Request payload for generating a reviewable patch proposal via the mock provider."""
+    """Request payload for generating a reviewable patch proposal via the mock or AI provider."""
     localization: LocalizationResult = Field(
         ...,
         description="Validated localization result containing candidate locations and evidence.",
@@ -198,6 +198,11 @@ class PatchProposeRequest(BaseModel):
         None,
         description="Optional context parameters (e.g., repository metadata, issue summary).",
     )
+    provider: Optional[str] = Field(
+        "mock",
+        description="Patch provider implementation to use ('mock' or 'ai'). Default is 'mock'.",
+    )
+
 
 
 class PatchProposeResponse(BaseModel):
@@ -321,4 +326,84 @@ class PatchVerifyTestResponse(BaseModel):
     test_command: str = ""
     pre_patch_observed: bool = False
     details: str = ""
+
+
+# --- Phase 6B API Endpoint Schemas ---
+
+
+class RepairLoopOutcome(str, Enum):
+    """Top-level outcome classification for a bounded automated repair loop."""
+    FIX_VERIFIED   = "fix_verified"
+    FIX_INCOMPLETE = "fix_incomplete"
+    BLOCKED        = "blocked"
+
+
+class RepairAttemptRecord(BaseModel):
+    """Public record of a single patch attempt within the repair loop."""
+    attempt_number: int
+    proposal_id: str = ""
+    validation_errors: List[str] = []
+    application_errors: List[str] = []
+    verification_outcome: Optional[str] = None
+    verification_details: str = ""
+    duration_ms: float = 0.0
+
+
+class RepairLoopRequest(BaseModel):
+    """Request payload to initiate a bounded automated repair loop.
+
+    Security: workspace_path is resolved server-side from session_id.
+    Callers cannot specify arbitrary filesystem paths.
+    """
+    session_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="ID of a prepared sandbox session with an established reproduction outcome.",
+    )
+    localization: LocalizationResult = Field(
+        ...,
+        description="Structured localization evidence guiding patch generation.",
+    )
+    test_command: str = Field(
+        ...,
+        min_length=1,
+        max_length=1000,
+        description="Allowlisted test command for post-patch Docker verification.",
+    )
+    expected_failure_pattern: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Error pattern to verify absence of after the patch.",
+    )
+    provider: Optional[str] = Field(
+        "mock",
+        description="Patch provider: 'mock' (default) or 'ai'.",
+    )
+    context: Optional[dict] = Field(
+        None,
+        description="Optional context dict passed to the patch provider.",
+    )
+    test_timeout: Optional[int] = Field(
+        60,
+        ge=5,
+        le=300,
+        description="Per-Docker-run timeout in seconds.",
+    )
+
+
+class RepairLoopResponse(BaseModel):
+    """Response payload for the bounded automated repair loop."""
+    success: bool
+    outcome: RepairLoopOutcome
+    session_id: str
+    attempts: List[RepairAttemptRecord] = []
+    final_details: str = ""
+    total_duration_ms: float = 0.0
+    real_ai_call_made: bool = False
+
+
+class SessionResetRequest(BaseModel):
+    """Payload to reset a dirty session workspace."""
+    session_id: str = Field(..., min_length=1, max_length=64, description="ID of the session to reset.")
 

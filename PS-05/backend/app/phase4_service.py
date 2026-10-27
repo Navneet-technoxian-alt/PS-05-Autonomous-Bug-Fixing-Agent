@@ -18,7 +18,12 @@ from typing import Optional
 from fastapi import HTTPException
 
 from app.localization_engine import LocalizationEngine
-from app.patch_provider import MockPatchProvider, PatchProviderError
+from app.patch_provider import (
+    BasePatchProvider,
+    MockPatchProvider,
+    PatchProviderError,
+    get_patch_provider,
+)
 from app.patch_validator import PatchValidator, PatchValidatorConfig
 from app.schemas import (
     LocalizationResult,
@@ -43,7 +48,7 @@ class Phase4Service:
     def __init__(
         self,
         localization_engine: Optional[LocalizationEngine] = None,
-        patch_provider: Optional[MockPatchProvider] = None,
+        patch_provider: Optional[BasePatchProvider] = None,
     ):
         self._engine = localization_engine or LocalizationEngine()
         self._provider = patch_provider or MockPatchProvider()
@@ -71,13 +76,18 @@ class Phase4Service:
             )
 
     def propose_patch(self, request: PatchProposeRequest) -> PatchProposeResponse:
-        """Generate a reviewable patch proposal through the mock provider.
+        """Generate a reviewable patch proposal through the configured or requested provider.
 
         The proposal contains a unified diff, rationale, and suggested regression tests.
         No files are created, modified, committed, or pushed.
         """
         try:
-            proposal = self._provider.propose_patch(
+            if request.provider and request.provider.lower() != "mock":
+                provider = get_patch_provider(request.provider)
+            else:
+                provider = self._provider
+
+            proposal = provider.propose_patch(
                 localization=request.localization,
                 context=request.context,
             )

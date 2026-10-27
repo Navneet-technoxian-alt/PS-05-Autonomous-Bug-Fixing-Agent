@@ -1,0 +1,60 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: #070B14;
+    color: #F1F5F9;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+}
+
+/* Custom cyber scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0B0F19;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1E293B;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #0284C7;
+}
+
+/* Diff styling */
+.diff-line-add {
+  background-color: rgba(16, 185, 129, 0.12);
+  color: #34D399;
+}
+
+.diff-line-del {
+  background-color: rgba(244, 63, 94, 0.12);
+  color: #FB7185;
+}
+
+.diff-line-hunk {
+  background-color: rgba(14, 165, 233, 0.12);
+  color: #38BDF8;
+}
+
+/* Subtle glow animations */
+@keyframes cyber-glow {
+  0%, 100% {
+    box-shadow: 0 0 15px -2px rgba(14, 165, 233, 0.2);
+  }
+  50% {
+    box-shadow: 0 0 25px 2px rgba(0, 229, 255, 0.35);
+  }
+}
+
+.animate-cyber-glow {
+  animation: cyber-glow 4s ease-in-out infinite;
+}

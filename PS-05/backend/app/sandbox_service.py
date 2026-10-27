@@ -29,6 +29,8 @@ class SandboxSessionData:
         self.reproduction_result: Optional[ReproductionResult] = None
         self.expected_failure_pattern: Optional[str] = None
         self.error_message: Optional[str] = None
+        self.is_dirty: bool = False
+        self.last_repair_outcome: Optional[str] = None
 
 
 
@@ -169,3 +171,11 @@ class SandboxService:
             session.workspace_path = None
             return True
         return False
+
+    def reset_session_dirty(self, session_id: str) -> bool:
+        """Explicitly reset the dirty flag for a session if it exists."""
+        session = self.sessions.get(session_id)
+        if not session:
+            return False
+        session.is_dirty = False
+        return True

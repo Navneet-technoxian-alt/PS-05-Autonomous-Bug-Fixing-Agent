@@ -45,6 +45,8 @@ class PatchApplicationResult:
     applied: bool
     applied_files: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    is_security_violation: bool = False
+    backup_snapshot: Optional[Dict[Path, Optional[str]]] = None
 
 
 @dataclass
@@ -110,13 +112,24 @@ class PatchApplier:
         if resolved == home:
             raise ValueError(f"Refusing to apply patch to user home directory: {resolved}")
 
-        # Prohibit current working directory or application source tree
+        # Anchor protected application source trees to actual module location
+        # This file is located at <project_root>/backend/app/patch_applier.py
+        app_dir = Path(__file__).resolve().parent          # .../backend/app
+        backend_dir = app_dir.parent                      # .../backend
+        project_root = backend_dir.parent                 # .../PS-05
+
+        for protected in (app_dir, backend_dir, project_root):
+            try:
+                if resolved == protected or resolved.is_relative_to(protected):
+                    raise ValueError(f"Refusing to apply patch to PS-05 application source directory: {resolved}")
+            except AttributeError:
+                if os.path.commonpath([str(resolved), str(protected)]) == str(protected):
+                    raise ValueError(f"Refusing to apply patch to PS-05 application source directory: {resolved}")
+
+        # Prohibit current working directory as an additional guard
         cwd = Path.cwd().resolve()
-        if resolved == cwd or resolved in cwd.parents or cwd in resolved.parents:
-            # Check if this is the PS-05 source tree
-            app_dir = (cwd / "app").resolve()
-            if app_dir.exists() and (resolved == cwd or app_dir in resolved.parents):
-                raise ValueError("Refusing to apply patch to PS-05 application source directory.")
+        if resolved == cwd:
+            raise ValueError(f"Refusing to apply patch to current working directory: {resolved}")
 
     def apply(self, unified_diff: Union[str, bytes]) -> PatchApplicationResult:
         """Validate and apply a unified diff to the managed workspace.
@@ -132,6 +145,7 @@ class PatchApplier:
                 applied=False,
                 applied_files=[],
                 errors=list(validation.errors),
+                is_security_violation=validation.is_security_violation,
             )
 
         diff_text = unified_diff if isinstance(unified_diff, str) else unified_diff.decode("utf-8")
@@ -164,7 +178,12 @@ class PatchApplier:
         for patch in file_patches:
             target_path = self._resolve_target_path(patch.clean_path, errors)
             if errors:
-                return PatchApplicationResult(success=False, applied=False, errors=errors)
+                return PatchApplicationResult(
+                    success=False,
+                    applied=False,
+                    errors=errors,
+                    is_security_violation=True,
+                )
 
             if patch.is_create:
                 if target_path.exists():
@@ -262,7 +281,47 @@ class PatchApplier:
             applied=True,
             applied_files=applied_files,
             errors=[],
+            is_security_violation=False,
+            backup_snapshot=backups,
         )
+
+    def rollback(self, backup_snapshot: Optional[Dict[Path, Optional[str]]]) -> Tuple[bool, List[str]]:
+        """Safely restore files to their pre-patch state using a backup snapshot.
+
+        Guarantees:
+        - Recreates original content for modified files.
+        - Deletes newly created files.
+        - Recreates deleted files with their original content.
+        - Strictly verifies paths remain within workspace root.
+        """
+        if not backup_snapshot:
+            return True, []
+
+        errors: List[str] = []
+        for path, orig in backup_snapshot.items():
+            try:
+                resolved = path.resolve()
+                try:
+                    if not resolved.is_relative_to(self._workspace_root):
+                        errors.append(f"Refusing to rollback file outside workspace: {path}")
+                        continue
+                except AttributeError:
+                    if os.path.commonpath([str(resolved), str(self._workspace_root)]) != str(self._workspace_root):
+                        errors.append(f"Refusing to rollback file outside workspace: {path}")
+                        continue
+
+                if orig is None:
+                    # File was newly created by the patch; delete it
+                    if path.exists():
+                        path.unlink()
+                else:
+                    # File was modified or deleted; restore original content
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(orig, encoding="utf-8")
+            except Exception as exc:
+                errors.append(f"Failed to rollback '{path}': {exc}")
+
+        return (len(errors) == 0), errors
 
     def _resolve_target_path(self, clean_path: str, errors: List[str]) -> Path:
         """Resolve target path securely and verify workspace containment."""

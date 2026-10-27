@@ -303,9 +303,60 @@ def test_target_file_not_found_fails_cleanly(workspace: Path):
 # ---------------------------------------------------------------------------
 
 def test_refuse_root_or_app_source_directory():
+    """Verify PatchApplier refuses filesystem root, cwd, app source, and project root."""
+    # Prohibit current working directory
     with pytest.raises(ValueError, match="Refusing to apply patch"):
-        # Points to current working directory (which is the app source)
         PatchApplier(workspace_root=Path.cwd())
+
+    # Prohibit app source directory, backend root, and project root
+    import app
+    app_dir = Path(app.__file__).resolve().parent
+    backend_dir = app_dir.parent
+    project_root = backend_dir.parent
+
+    for protected in (app_dir, backend_dir, project_root):
+        with pytest.raises(ValueError, match="Refusing to apply patch"):
+            PatchApplier(workspace_root=protected)
+
+
+def test_patch_applier_rollback_success(workspace: Path):
+    """Verify PatchApplier.rollback safely restores modified files and removes created files."""
+    calc_path = workspace / "app" / "calculator.py"
+    calc_path.parent.mkdir(parents=True, exist_ok=True)
+    original_text = "def add(a, b):\n    return a + b\n"
+    calc_path.write_text(original_text, encoding="utf-8")
+
+    diff = (
+        "--- a/app/calculator.py\n"
+        "+++ b/app/calculator.py\n"
+        "@@ -1,2 +1,3 @@\n"
+        " def add(a, b):\n"
+        "+    # modified\n"
+        "     return a + b\n"
+        "--- /dev/null\n"
+        "+++ b/app/created.py\n"
+        "@@ -0,0 +1,1 @@\n"
+        "+# created\n"
+    )
+
+    applier = PatchApplier(workspace_root=workspace)
+    result = applier.apply(diff)
+    assert result.success is True
+    assert result.applied is True
+    assert result.backup_snapshot is not None
+
+    created_path = workspace / "app" / "created.py"
+    assert created_path.exists()
+    assert "# modified" in calc_path.read_text(encoding="utf-8")
+
+    # Perform rollback
+    rb_ok, rb_errs = applier.rollback(result.backup_snapshot)
+    assert rb_ok is True
+    assert rb_errs == []
+
+    # Verify original state restored and created file unlinked
+    assert calc_path.read_text(encoding="utf-8") == original_text
+    assert not created_path.exists()
 
 
 # ---------------------------------------------------------------------------

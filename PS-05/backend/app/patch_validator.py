@@ -97,6 +97,34 @@ class PatchValidationResult:
     affected_files: List[str] = field(default_factory=list)
     total_files_analyzed: int = 0
     total_hunks_analyzed: int = 0
+    is_security_violation: bool = False
+
+
+SECURITY_VIOLATION_PATTERNS = (
+    "traversal",
+    "absolute path",
+    "unc share",
+    "drive path or colon",
+    "null byte",
+    "symlink",
+    "outside workspace",
+    "sensitive file",
+    "protected repository directory",
+    "forbidden in path",
+    "is forbidden",
+    "is blocked",
+    "blocked for file",
+    "blocked extension",
+    "not in the allowed extensions",
+)
+
+
+def is_patch_security_violation(errors: Union[List[str], str]) -> bool:
+    """Check whether any validation or application error represents a security violation."""
+    if isinstance(errors, str):
+        errors = [errors]
+    combined = " ".join(errors).lower()
+    return any(p in combined for p in SECURITY_VIOLATION_PATTERNS)
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +158,7 @@ class PatchValidator:
 
     def validate(self, unified_diff: Union[str, bytes]) -> PatchValidationResult:
         """Validate a unified diff string or bytes against safety policies.
-        
+
         Guaranteed to be strictly read-only. Does not modify any file or execute code.
         """
         errors: List[str] = []
@@ -141,14 +169,22 @@ class PatchValidator:
 
         if isinstance(unified_diff, bytes):
             if b"\x00" in unified_diff:
-                return PatchValidationResult(is_valid=False, errors=["Binary patches containing null bytes are rejected."])
+                return PatchValidationResult(
+                    is_valid=False,
+                    errors=["Binary patches containing null bytes are rejected."],
+                    is_security_violation=True,
+                )
             try:
                 diff_text = unified_diff.decode("utf-8")
             except UnicodeDecodeError as exc:
                 return PatchValidationResult(is_valid=False, errors=[f"Diff is not valid UTF-8: {exc}"])
         elif isinstance(unified_diff, str):
             if "\x00" in unified_diff:
-                return PatchValidationResult(is_valid=False, errors=["Binary patches containing null bytes are rejected."])
+                return PatchValidationResult(
+                    is_valid=False,
+                    errors=["Binary patches containing null bytes are rejected."],
+                    is_security_violation=True,
+                )
             diff_text = unified_diff
         else:
             return PatchValidationResult(
@@ -230,12 +266,15 @@ class PatchValidator:
             if clean_rel_path not in affected_files:
                 affected_files.append(clean_rel_path)
 
+        has_security_violation = is_patch_security_violation(errors)
+
         return PatchValidationResult(
             is_valid=(len(errors) == 0),
             errors=errors,
             affected_files=affected_files,
             total_files_analyzed=len(file_sections),
             total_hunks_analyzed=total_hunks,
+            is_security_violation=has_security_violation,
         )
 
     def _parse_file_sections(self, lines: List[str], errors: List[str]) -> List[dict]:

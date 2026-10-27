@@ -12,15 +12,23 @@ from app.schemas import (
     PatchValidateResponse,
     PatchVerifyTestRequest,
     PatchVerifyTestResponse,
+    RepairLoopRequest,
+    RepairLoopResponse,
+    RepairAttemptRecord,
+    RepairLoopOutcome,
     ReproductionRequest,
     SandboxPrepareRequest,
     SandboxSessionResponse,
+    SessionResetRequest,
 )
 from app.issue_service import IssueService
 from app.sandbox_service import SandboxService
 from app.phase4_service import Phase4Service
 from app.patch_applier import apply_patch
 from app.patch_verifier import PatchVerifier
+from app.repair_loop import RepairLoopService, RepairOutcome
+
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="PS-05 Autonomous Bug-Fixing Agent",
@@ -28,10 +36,19 @@ app = FastAPI(
     version="0.1.0",
 )
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 issue_service = IssueService()
 sandbox_service = SandboxService()
 phase4_service = Phase4Service()
 patch_verifier = PatchVerifier(sandbox_service.sandbox_controller)
+repair_loop_service = RepairLoopService(patch_verifier=patch_verifier)
 
 
 
@@ -85,7 +102,7 @@ def localize_bug(payload: LocalizeRequest):
 def propose_patch(payload: PatchProposeRequest):
     """Generate a reviewable patch proposal from localization results.
 
-    Uses the mock deterministic provider. No files are written, applied, or committed.
+    Uses the mock deterministic provider or real AI provider. No files are written, applied, or committed.
     """
     return phase4_service.propose_patch(payload)
 
@@ -138,6 +155,9 @@ def apply_patch_endpoint(payload: PatchApplyRequest):
         unified_diff=payload.unified_diff,
         workspace_root=session.workspace_path,
     )
+    if result.applied:
+        session.is_dirty = True
+
     return PatchApplyResponse(
         success=result.success,
         applied=result.applied,
@@ -209,4 +229,108 @@ def verify_patch_test_endpoint(payload: PatchVerifyTestRequest):
         pre_patch_observed=result.pre_patch_observed,
         details=result.details,
     )
+
+
+# --- Phase 6B Endpoints ---
+
+
+@app.post("/patch/repair-loop", response_model=RepairLoopResponse)
+def repair_loop_endpoint(payload: RepairLoopRequest):
+    """Bounded automated repair loop: generate, validate, apply, and verify a patch inside Docker.
+
+    Security:
+      - workspace_path is resolved server-side from session_id; callers cannot specify arbitrary paths.
+      - Requires an established REPRODUCED reproduction outcome for the session.
+      - All patch execution occurs inside the restricted Docker sandbox.
+      - At most 3 attempts; fails closed on security violations or BLOCKED outcomes.
+      - FIX_VERIFIED only returned when Phase 5B evidence confirms defect resolved.
+      - No Git commit, push, PR creation, or host shell execution.
+    """
+    session = sandbox_service.sessions.get(payload.session_id)
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sandbox session '{payload.session_id}' not found.",
+        )
+    if not session.workspace_path:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Session '{payload.session_id}' has no active workspace.",
+        )
+
+    # Prevent dirty workspace reuse from prior unverified repair attempts
+    if getattr(session, "is_dirty", False):
+        return RepairLoopResponse(
+            success=True,
+            outcome=RepairLoopOutcome.BLOCKED,
+            session_id=payload.session_id,
+            final_details="Session workspace is in a dirty/modified state from a prior patch. Further repair runs are blocked until the workspace is reset.",
+        )
+
+    # Extract pre-patch evidence from session
+    pre_patch_outcome = None
+    if session.reproduction_result:
+        pre_patch_outcome = session.reproduction_result.outcome
+
+    expected_pattern = payload.expected_failure_pattern or session.expected_failure_pattern
+
+    result = repair_loop_service.run(
+        session_id=payload.session_id,
+        workspace_path=session.workspace_path,
+        localization=payload.localization,
+        pre_patch_outcome=pre_patch_outcome,
+        test_command=payload.test_command,
+        provider_name=payload.provider or "mock",
+        expected_failure_pattern=expected_pattern,
+        context=payload.context,
+        test_timeout=payload.test_timeout or 60,
+        session_is_dirty=getattr(session, "is_dirty", False),
+    )
+
+    # Persist dirty state and last outcome on the session
+    session.is_dirty = getattr(result, "workspace_dirty", False)
+    session.last_repair_outcome = result.outcome.value
+
+    # Map RepairOutcome -> RepairLoopOutcome (both share same string values)
+    outcome_map = {
+        RepairOutcome.FIX_VERIFIED:   RepairLoopOutcome.FIX_VERIFIED,
+        RepairOutcome.FIX_INCOMPLETE: RepairLoopOutcome.FIX_INCOMPLETE,
+        RepairOutcome.BLOCKED:        RepairLoopOutcome.BLOCKED,
+    }
+
+    attempt_records = [
+        RepairAttemptRecord(
+            attempt_number=a.attempt_number,
+            proposal_id=a.proposal_id,
+            validation_errors=a.validation_errors,
+            application_errors=a.application_errors,
+            verification_outcome=a.verification_outcome.value if a.verification_outcome else None,
+            verification_details=a.verification_details,
+            duration_ms=a.duration_ms,
+        )
+        for a in result.attempts
+    ]
+
+    return RepairLoopResponse(
+        success=True,
+        outcome=outcome_map[result.outcome],
+        session_id=result.session_id,
+        attempts=attempt_records,
+        final_details=result.final_details,
+        total_duration_ms=result.total_duration_ms,
+        real_ai_call_made=result.real_ai_call_made,
+    )
+
+
+@app.post("/patch/reset-dirty")
+def reset_dirty_endpoint(payload: SessionResetRequest):
+    """Explicitly reset the dirty state of a sandbox session workspace."""
+    session = sandbox_service.sessions.get(payload.session_id)
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sandbox session '{payload.session_id}' not found.",
+        )
+    session.is_dirty = False
+    return {"success": True, "session_id": payload.session_id, "is_dirty": False}
 
