@@ -240,3 +240,85 @@ class PatchValidateResponse(BaseModel):
     total_files_analyzed: int = 0
     total_hunks_analyzed: int = 0
 
+
+# --- Phase 5A API Endpoint Schemas ---
+
+
+class PatchApplyRequest(BaseModel):
+    """Request payload for safely applying a unified diff to a managed sandbox workspace.
+
+    Security: The session_id is resolved server-side to an isolated disposable workspace.
+    Callers cannot supply arbitrary filesystem paths.
+    """
+    session_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="ID of a previously prepared sandbox session whose workspace will be patched.",
+    )
+    unified_diff: str = Field(
+        ...,
+        min_length=1,
+        max_length=_MAX_DIFF_INPUT,
+        description="Validated unified diff to apply inside the disposable workspace.",
+    )
+
+
+class PatchApplyResponse(BaseModel):
+    """Response payload for patch application results."""
+    success: bool
+    applied: bool
+    applied_files: List[str] = []
+    errors: List[str] = []
+
+
+# --- Phase 5B API Endpoint Schemas ---
+
+
+class PatchVerificationOutcome(str, Enum):
+    """Classification outcome for post-patch test verification."""
+    FIX_VERIFIED = "fix_verified"
+    FIX_INCOMPLETE = "fix_incomplete"
+    NEW_REGRESSION = "new_regression"
+    BLOCKED = "blocked"
+
+
+class PatchVerifyTestRequest(BaseModel):
+    """Request payload for executing tests after patch application inside Docker."""
+    session_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="ID of a prepared sandbox session whose patched workspace will be tested.",
+    )
+    test_command: Optional[str] = Field(
+        None,
+        max_length=1000,
+        description="Constrained test command (e.g. 'pytest', 'pytest tests/test_bug.py'). Must match safe profiles.",
+    )
+    expected_failure_pattern: Optional[str] = Field(
+        None,
+        max_length=500,
+        description="Error or exception pattern previously reproduced, to verify absence of.",
+    )
+    timeout: Optional[int] = Field(
+        60,
+        ge=5,
+        le=300,
+        description="Execution timeout in seconds.",
+    )
+
+
+class PatchVerifyTestResponse(BaseModel):
+    """Response payload containing empirical post-patch verification evidence."""
+    success: bool
+    outcome: PatchVerificationOutcome
+    exit_code: Optional[int] = None
+    timed_out: bool = False
+    stdout: str = ""
+    stderr: str = ""
+    duration_ms: Optional[float] = None
+    test_command: str = ""
+    pre_patch_observed: bool = False
+    details: str = ""
+

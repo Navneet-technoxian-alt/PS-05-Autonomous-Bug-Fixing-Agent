@@ -27,7 +27,9 @@ class SandboxSessionData:
         self.workspace_path: Optional[str] = None
         self.candidate_test_commands: list[str] = []
         self.reproduction_result: Optional[ReproductionResult] = None
+        self.expected_failure_pattern: Optional[str] = None
         self.error_message: Optional[str] = None
+
 
 
 class SandboxService:
@@ -124,9 +126,11 @@ class SandboxService:
         )
 
         session.reproduction_result = result
+        session.expected_failure_pattern = request.expected_failure_pattern
 
         # State transition: COMPLETED
         session.state = SandboxState.COMPLETED
+
 
         return self.get_session_response(request.session_id)
 

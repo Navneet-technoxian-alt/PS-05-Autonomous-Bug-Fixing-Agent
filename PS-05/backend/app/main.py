@@ -4,10 +4,14 @@ from app.schemas import (
     IssueAnalyzeResponse,
     LocalizeRequest,
     LocalizeResponse,
+    PatchApplyRequest,
+    PatchApplyResponse,
     PatchProposeRequest,
     PatchProposeResponse,
     PatchValidateRequest,
     PatchValidateResponse,
+    PatchVerifyTestRequest,
+    PatchVerifyTestResponse,
     ReproductionRequest,
     SandboxPrepareRequest,
     SandboxSessionResponse,
@@ -15,6 +19,8 @@ from app.schemas import (
 from app.issue_service import IssueService
 from app.sandbox_service import SandboxService
 from app.phase4_service import Phase4Service
+from app.patch_applier import apply_patch
+from app.patch_verifier import PatchVerifier
 
 app = FastAPI(
     title="PS-05 Autonomous Bug-Fixing Agent",
@@ -25,6 +31,8 @@ app = FastAPI(
 issue_service = IssueService()
 sandbox_service = SandboxService()
 phase4_service = Phase4Service()
+patch_verifier = PatchVerifier(sandbox_service.sandbox_controller)
+
 
 
 @app.get("/health")
@@ -102,4 +110,103 @@ def validate_patch(payload: PatchValidateRequest):
             detail=f"Session '{payload.session_id}' has no active workspace.",
         )
     return phase4_service.validate_patch(payload, session.workspace_path)
+
+
+# --- Phase 5A Endpoints ---
+
+
+@app.post("/patch/apply", response_model=PatchApplyResponse)
+def apply_patch_endpoint(payload: PatchApplyRequest):
+    """Safely apply a validated unified diff inside a managed sandbox workspace.
+
+    Security: workspace root is resolved server-side from session_id.
+    Caller cannot specify arbitrary paths. The diff is revalidated immediately
+    before applying. Changes are applied in-process with atomic rollback.
+    """
+    session = sandbox_service.sessions.get(payload.session_id)
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sandbox session '{payload.session_id}' not found.",
+        )
+    if not session.workspace_path:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Session '{payload.session_id}' has no active workspace.",
+        )
+    result = apply_patch(
+        unified_diff=payload.unified_diff,
+        workspace_root=session.workspace_path,
+    )
+    return PatchApplyResponse(
+        success=result.success,
+        applied=result.applied,
+        applied_files=result.applied_files,
+        errors=result.errors,
+    )
+
+
+# --- Phase 5B Endpoints ---
+
+
+@app.post("/patch/verify-test", response_model=PatchVerifyTestResponse)
+def verify_patch_test_endpoint(payload: PatchVerifyTestRequest):
+    """Empirically verify that an applied patch resolves the defect inside Docker.
+
+    Security: Workspace root is resolved server-side from session_id.
+    Executes strictly inside the restricted Docker sandbox (--network=none,
+    --cap-drop=ALL, non-root user, memory/CPU/PID limits, read-only mount).
+    Never executes untrusted code on the host. Requires pre-patch failure
+    evidence before claiming FIX_VERIFIED.
+    """
+    session = sandbox_service.sessions.get(payload.session_id)
+    if not session:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Sandbox session '{payload.session_id}' not found.",
+        )
+    if not session.workspace_path:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Session '{payload.session_id}' has no active workspace.",
+        )
+
+    # Determine test command to execute
+    test_cmd = payload.test_command
+    if not test_cmd and session.candidate_test_commands:
+        test_cmd = session.candidate_test_commands[0]
+
+    if not test_cmd:
+        raise HTTPException(
+            status_code=400,
+            detail="No test command provided and no candidate test commands were detected.",
+        )
+
+    # Extract pre-patch reproduction evidence
+    pre_patch_outcome = None
+    if session.reproduction_result:
+        pre_patch_outcome = session.reproduction_result.outcome
+
+    expected_pattern = payload.expected_failure_pattern or session.expected_failure_pattern
+
+    result = patch_verifier.verify_patch(
+        workspace_path=session.workspace_path,
+        test_command=test_cmd,
+        pre_patch_outcome=pre_patch_outcome,
+        expected_failure_pattern=expected_pattern,
+        timeout=payload.timeout or 60,
+    )
+
+    return PatchVerifyTestResponse(
+        success=True,
+        outcome=result.outcome,
+        exit_code=result.exit_code,
+        timed_out=result.timed_out,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        duration_ms=result.duration_ms,
+        test_command=result.test_command,
+        pre_patch_observed=result.pre_patch_observed,
+        details=result.details,
+    )
 
